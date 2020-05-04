@@ -1,0 +1,5 @@
+*~
+*.o
+*.prg
+*.bin
+.vscode
