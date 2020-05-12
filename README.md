@@ -15,16 +15,16 @@ SD card may be used for storing C64 software.
 
 Features of current software:
  * Browser for SD card
- ** Can load and run PRG files
- ** Can open D64 disk images and load and run PRG files
- ** Can traverse directory structure
- ** Arduino keeps track of current directory
- * Pressing RESTORE three times resets C64 and loads SD browser
+   * Load and run PRG files
+   * Open D64 disk images and load and run PRG files
+   * Traverse directory structure
+     * Arduino keeps track of current directory
+ * Pressing RESTORE quickly three times resets C64 and loads SD browser
  * Upload PRG file from host computer to C64
- * Upload a file from host computer to SD card
- * Download file from SD card to host computer
  * Control SD card files
- ** ls - LiSt files
- ** rm - ReMove file
- ** cd - Change Dir
+   * Upload a file from host computer to SD card
+   * Download file from SD card to host computer
+   * ls - LiSt files
+   * rm - ReMove file
+   * cd - Change Dir
  
