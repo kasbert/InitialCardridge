@@ -10,7 +10,6 @@ logging.basicConfig(format='%(asctime)s [%(levelname)s] %(message)s',
 
 log = logging.getLogger('modem')
 
-
 def crc16(data, crc=0):
     '''
     Calculates the (unsigned) 16 bit cyclic redundancy check of a byte
@@ -23,7 +22,7 @@ def crc16(data, crc=0):
 
     '''
     for char in data:
-        crc = (crc << 8) ^ CRC16_MAP[((crc >> 0x08) ^ ord(char)) & 0xff]
+        crc = (crc << 8) ^ CRC16_MAP[((crc >> 0x08) ^ char) & 0xff]
     return crc & 0xffff
 
 

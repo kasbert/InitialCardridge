@@ -27,7 +27,7 @@ class XMODEM(Modem):
         '''
         Send an abort sequence using CAN bytes.
         '''
-        for counter in xrange(0, count):
+        for counter in range(0, count):
             self.putc(CAN, timeout)
 
     def send(self, stream, retry=16, timeout=60, quiet=0):
@@ -62,7 +62,7 @@ class XMODEM(Modem):
                     else:
                         cancel = 1
                 else:
-                    log.error(error.ERROR_EXPECT_NAK_CRC % ord(char))
+                    log.error(error.ERROR_EXPECT_NAK_CRC % repr(char))
 
             error_count += 1
             if error_count >= retry:
@@ -146,7 +146,7 @@ class XMODEM(Modem):
                     else:
                         cancel = 1
                 else:
-                    log.debug(error.DEBUG_EXPECT_SOH_EOT % ord(char))
+                    log.debug(error.DEBUG_EXPECT_SOH_EOT % repr(char))
                     error_count += 1
                     if error_count >= retry:
                         self.abort()
@@ -155,8 +155,9 @@ class XMODEM(Modem):
             # read sequence
             error_count = 0
             cancel = 0
-            seq1 = ord(self.getc(1))
-            seq2 = 0xff - ord(self.getc(1))
+            # FIXME check error
+            seq1 = self.getc(1)[0]
+            seq2 = 0xff - self.getc(1)[0]
             if seq1 == sequence and seq2 == sequence:
                 # sequence is ok, read packet
                 # packet_size + checksum
@@ -209,7 +210,7 @@ class XMODEM(Modem):
                 packet_size = (len(data) <= 128) and 128 or 1024
 
             # Align the packet
-            data = data.ljust(packet_size, '\x00')
+            data = data.ljust(packet_size, b'\x00')
 
             # Calculate CRC or checksum
             crc = crc_mode and self.calc_crc16(data) or \
@@ -243,15 +244,15 @@ class XMODEM(Modem):
         start_char = SOH if packet_size == 128 else STX
         while True:
             self.putc(start_char)
-            self.putc(chr(sequence))
-            self.putc(chr(0xff - sequence))
+            self.putc(sequence.to_bytes(1,'big'))
+            self.putc((0xff - sequence).to_bytes(1,'big'))
             self.putc(data)
             if crc_mode:
-                self.putc(chr(crc >> 8))
-                self.putc(chr(crc & 0xff))
+                self.putc((crc >> 8).to_bytes(1,'big'))
+                self.putc((crc & 0xff).to_bytes(1,'big'))
             else:
                 # Send CRC or checksum
-                self.putc(chr(crc))
+                self.putc((crc).to_bytes(1,'big'))
 
             # Wait for the <ACK>
             char = self.getc(1, timeout)
@@ -373,8 +374,9 @@ class XMODEM(Modem):
                     self.abort(timeout=timeout)
                     return False
 
-                seq1 = ord(self.getc(1))
-                seq2 = 0xff - ord(self.getc(1))
+                # FIXME check error
+                seq1 = self.getc(1)[0]
+                seq2 = 0xff - self.getc(1)[0]
 
                 if seq1 == sequence and seq2 == sequence:
                     data = self.getc(packet_size + 1 + crc_mode)
@@ -409,7 +411,7 @@ class XMODEM(Modem):
                     char = self.getc(1, timeout)
                     continue
             else:
-                log.debug(error.DEBUG_EXPECT_SOH_EOT % ord(char))
+                log.debug(error.DEBUG_EXPECT_SOH_EOT % repr(char))
                 error_count += 1
                 if error_count >= retry:
                     log.error(error.ABORT_ERROR_LIMIT)

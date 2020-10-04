@@ -22,7 +22,7 @@ class Modem(object):
             '0x3c'
 
         '''
-        return (sum(map(ord, data)) + checksum) % 256
+        return (sum(data) + checksum) % 256
 
     def calc_crc16(self, data, crc=0):
         '''
@@ -35,9 +35,7 @@ class Modem(object):
             '0xd5e3'
 
         '''
-        for char in data:
-            crc = crc16(char, crc)
-        return crc
+        return crc16(data, crc)
 
     def calc_crc32(self, data, crc=0):
         '''
@@ -50,9 +48,7 @@ class Modem(object):
             '0x20ad'
 
         '''
-        for char in data:
-            crc = crc32(char, crc)
-        return crc
+        return crc32(char, crc)
 
     def _check_crc(self, data, crc_mode):
         '''
@@ -68,13 +64,13 @@ class Modem(object):
         or returns False in case of invalid checksum/CRC
         '''
         if crc_mode:
-            csum = (ord(data[-2]) << 8) + ord(data[-1])
+            csum = ((data[-2]) << 8) + (data[-1])
             data = data[:-2]
             mine = self.calc_crc16(data)
             if csum == mine:
                 return data
         else:
-            csum = ord(data[-3])
+            csum = (data[-3])
             data = data[:-1]
             mine = self.calc_checksum(data)
             if csum == mine:

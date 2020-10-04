@@ -279,15 +279,15 @@ ZMODEM ZSINIT frame
 
 '''
 
-SOH         = chr(0x01)
-STX         = chr(0x02)
-EOT         = chr(0x04)
-ACK         = chr(0x06)
-XON         = chr(0x11)
-XOFF        = chr(0x13)
-NAK         = chr(0x15)
-CAN         = chr(0x18)
-CRC         = chr(0x43)
+SOH         = b'\x01'
+STX         = b'\x02'
+EOT         = b'\x04'
+ACK         = b'\x06'
+XON         = b'\x11'
+XOFF        = b'\x13'
+NAK         = b'\x15'
+CAN         = b'\x18'
+CRC         = b'\x43'
 
 TIMEOUT     = None
 ZPAD        = 0x2a
