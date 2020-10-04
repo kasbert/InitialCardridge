@@ -1063,7 +1063,11 @@ void tree(File dir, char *p, char *buffer) {
 bool removeFileSD(const char *filename) {
   char newPath[PATH_MAX];
   makeFilePath(newPath, filename);
-  return SD.remove(newPath);
+  if (!SD.remove(newPath)) {
+    Serial.println("ERROR");
+    return false;
+  }
+  return true;
 }
 
 
