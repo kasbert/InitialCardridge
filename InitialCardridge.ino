@@ -1,4 +1,5 @@
 // Initial Cardridge  - C64 Cardridge with a Arduino Mega 2560
+//   by Jarkko Sonninen
 //
 // Some code from EEPROM Programmer by Written K Adcock.
 //
@@ -96,7 +97,7 @@ static const int kPin_nOE     = 2; // TODO not there
 static const int kPin_nWE     = 3;
 
 static const int kPin_nNMI    = 7;
-static const int kPin_nNMI2    = 62; // 7 was a poor choice. It has no PCINT. (62 = A8)
+static const int kPin_nNMI2    = 20; // 7 was a poor choice. It has no INT.
 static const int kPin_nRESET  = 6;
 static const int kPin_nEXROM  = 13;
 static const int kPin_nGAME   = 12;
@@ -110,8 +111,15 @@ static const int kPin_nSD_SEL    = 53;
 static const int kPin_LED_Red = 50;  // TODO not there
 static const int kPin_LED_Grn = 52; // TODO not there
 
-#define DEBUG(x) Serial.print(x)
-#define DEBUGLN(x) Serial.println(x)
+#if SECOND_SERIAL2
+HardwareSerial *currentSerial = &Serial;
+#define SERIAL2 (*currentSerial)
+#else
+#define SERIAL2 Serial
+#endif
+
+#define DEBUG(x) SERIAL2.print(x)
+#define DEBUGLN(x) SERIAL2.println(x)
 
 #define NOP __asm__ __volatile__ ("nop\n\t") // delay 62.5ns on a 16MHz AtMega
 
@@ -133,8 +141,8 @@ uint16_t loadAddr;
 
 
 void ReadString();
-bool ReadDPRAM();
-bool WriteDPRAM();
+bool sc_ReadDPRAM(const char *arg);
+bool sc_WriteDPRAM(const char *arg);
 bool NMI();
 bool RESET();
 uint8_t CalcBufferChecksum(int size);
@@ -194,11 +202,17 @@ void setup()
   Serial.println();
   Serial.println(version_string);
 
+#if SECOND_SERIAL2
+  Serial2.begin(38400);
+  Serial2.setTimeout(50);
+  Serial2.println();
+  Serial2.println(version_string);
+#endif
+
   init_c64();
 
   //Connect A8 to NMI
   pinMode(kPin_nNMI2, INPUT_PULLUP);
-  // does not work attachInterrupt(digitalPinToInterrupt(kPin_nNMI2), blink, CHANGE);
   enableDetectNMI();
   PCMSK2 |= (1 << PCINT17);
   PCMSK2 |= (1 << PCINT19);
@@ -210,7 +224,7 @@ void loop()
   while (true)
   {
     //digitalWrite(kPin_WaitingForInput, HIGH);
-    ReadString();
+    readSerialString();
     //digitalWrite(kPin_WaitingForInput, LOW);
 
     digitalWrite(kPin_LED_Red, HIGH);
@@ -221,99 +235,121 @@ void loop()
   }
 }
 
+const char *err;
+
+// Serial Commands
+struct scmd {
+  const char *cstr;
+  bool (*cfunc)(const char *arg);
+} scmds [] = {
+  {"ls", sc_listFiles}, // SD
+  {"tree", sc_tree}, // SD
+  {"cd ", changeDir}, // SD
+  {"pwd", sc_pwd}, // SD
+  {"rx ", sc_recvFileX}, // Store to SD
+  {"sx ", sc_sendFileX}, // Read from SD
+  {"rm ", sc_removeFileSD}, // SD
+  {"load ", loadFileSD}, // load from SD to C64
+  {"run", sc_runBasic}, // Run in C64
+  {"p ", printText},
+  {"autosleep ", sc_playlistAutoSleep}, // Sleep in playlist
+  {"sleep ", sc_playlistSleep}, // Sleep in playlist
+  {"lc", sc_loadControl},
+  {"lb", sc_loadBrowser},
+  {"l", sc_quickLoad},
+  {"reset", sc_fastReset},
+  {"RESET", sc_RESET},
+  {"NMI", sc_NMI},
+  {"GAME", sc_GAME},
+  {"EXROM", sc_EXROM},
+  {"loadx ", loadFileX}, // Load from serial to C64
+  {0,0},
+};
+
 void handleSerialCommand() {
-  bool ok = false ;
-  if (!strcmp((char*)cmd_buffer, "ls")) { // SD
-    listFiles();
-    ok = true;
-  } else if (!strcmp((char*)cmd_buffer, "tree")) { // SD
-    root = SD.open("/");
-    buffer[0] = '/';
-    tree(root, (char*)buffer + 1, (char*)buffer);
-    root.close();
-    ok = true;
-  } else if (!strncmp((char*)cmd_buffer, "cd ", 3)) { // SD
-    ok = changeDir((const char*)cmd_buffer + 3);
-  } else if (!strcmp((char*)cmd_buffer, "pwd")) { // SD
-    Serial.println(currentPath);
-  } else if (!strncmp((char*)cmd_buffer, "rx ", 3)) { // Store to SD
-    ok = recvFileX((char*)cmd_buffer + 3);
-  } else if (!strncmp((char*)cmd_buffer, "sx ", 3)) { // Read from SD
-    ok = sendFileX((char*)cmd_buffer + 3);
-  } else if (!strncmp((char*)cmd_buffer, "rm ", 3)) { // SD
-    ok = removeFileSD((char*)cmd_buffer + 3);
-  } else if (!strncmp((char*)cmd_buffer, "load ", 5)) { // load from SD to C64
-    ok = loadFileSD((char*)cmd_buffer + 5);
-  } else if (!strcmp((char*)cmd_buffer, "run")) { // Run in C64
-    ok = runBasic();
-  } else if (!strncmp((char*)cmd_buffer, "p ", 2)) { // Print text
-    ok = printText((char*)cmd_buffer + 2);
-  } else if (!strncmp((char*)cmd_buffer, "autosleep ", 10)) { // Sleep in playlist
-    ok = playlistAutoSleep(atoi((char*)cmd_buffer + 10));
-  } else if (!strncmp((char*)cmd_buffer, "sleep ", 6)) { // Sleep in playlist
-    ok = playlistSleep(atoi((char*)cmd_buffer + 6));
-  } else if (!strcmp((char*)cmd_buffer, "lc")) {
-    ok = loadControlSD() || loadControl();
-  } else if (!strcmp((char*)cmd_buffer, "lb")) {
-    ok = loadBrowser();
-  } else if (!strcmp((char*)cmd_buffer, "l")) {
-    ok = loadFileSD("BOULDE~2.PRG"); // for quick testing
-    //ok = listD64("still_strong.d64"); // for quick testing
-  } else if (!strcmp((char*)cmd_buffer, "reset")) { // Reset C64 fast
-    ok = fastReset();
-  } else if (!strcmp((char*)cmd_buffer, "RESET")) {
-    ok = RESET();
-  } else if (!strcmp((char*)cmd_buffer, "NMI")) {
-    ok = RESET();
-  } else if (!strncmp((char*)cmd_buffer, "GAME=", 5)) {
-    ok = GAME((cmd_buffer[5] & 1) ? HIGH : LOW);
-  } else if (!strncmp((char*)cmd_buffer, "EXROM=", 6)) {
-    ok = EXROM((cmd_buffer[6] & 1) ? HIGH : LOW);
-  } else if (!strncmp((char*)cmd_buffer, "loadx ", 6)) { // Load from serial to C64
-    ok = loadFileX((char*)cmd_buffer + 6);
-  } else {
+  bool ok = false, found = false;
+  err = 0;
+  for (int i = 0; scmds[i].cstr; i++) {
+    int clen = strlen(scmds[i].cstr);
+    if (scmds[i].cstr[clen-1] != ' ') {
+      // no args
+      if (!strcmp(cmd_buffer, scmds[i].cstr)) {
+        ok = (scmds[i].cfunc)("");
+        found = true;
+        break;
+      }
+    } else {
+      // args
+      if (!strncmp(cmd_buffer, scmds[i].cstr, clen)) {
+        char *arg = cmd_buffer + clen;
+        ok = (scmds[i].cfunc)(arg);
+        found = true;
+        break;
+      }
+    }
+  }
+  
+  if (!found) {
     switch (cmd_buffer[0])
     {
-      case 'V': Serial.println(version_string); break;
-      case 'R': ok = ReadDPRAM(); break;
-      case 'W': ok = WriteDPRAM(); break;
-      case ':': ok = WriteDPRAMHex(); break;
-      case 'T': ok = TransferBytesToC64(); break;
-      case 'F': ok = TransferBytesFromC64(); break;
-      case '/':
-        {
-          int len = strlen((char*)cmd_buffer);
-          if (len > 3 && !strcmp((char*)cmd_buffer + len - 3, ".ic")) {
-            startPlaylist((char*)cmd_buffer );
-          } else {
-            fastReset();
-            ok = (loadFileSD((char*)cmd_buffer) && runBasic()); break;
-          }
-        }
+      case 'V': SERIAL2.println(version_string); ok = true; break;
+      case 'R': ok = sc_ReadDPRAM(cmd_buffer + 1); break;
+      case 'W': ok = sc_WriteDPRAM(cmd_buffer + 1); break;
+      case ':': ok = sc_WriteDPRAMHex(cmd_buffer + 1); break;
+      case 'T': ok = sc_TransferBytesToC64(cmd_buffer + 1); break;
+      case 'F': ok = sc_TransferBytesFromC64(cmd_buffer + 1); break;
+      case '/': ok = sc_absoluteFile(cmd_buffer); break;
 
       case 0: break; // empty string. Don't mind ignoring this.
       default:
-        Serial.println("ERR Unrecognised command"); break;
+        err = "SYNTAX ERROR";
+        break;
     }
   }
   if (ok) {
-    Serial.println("OK");
+    SERIAL2.println("OK");
+  } else {
+    SERIAL2.print("ERR");
+    if (err) {
+      SERIAL2.print(" ");
+      SERIAL2.print(err);
+    }
+    SERIAL2.println("");
   }
 }
 
 void enableDetectNMI() {
+#if 0
+  // use PCINT
   PCMSK2 |= (1 << PCINT16);
   PCICR |= (1 << PCIE2);
+#else
+  // use INT
+  attachInterrupt(digitalPinToInterrupt(kPin_nNMI2), nmiInterrupt, CHANGE);
+#endif
   NMICount = 0;
 }
 
 void disableDetectNMI() {
+#if 0
+  // use PCINT
   PCMSK2 &= ~(1 << PCINT16);
   PCICR &= ~(1 << PCIE2);
+#else
+  // use INT
+  attachInterrupt(digitalPinToInterrupt(kPin_nNMI2), 0, CHANGE);
+#endif
   NMICount = 0;
 }
 
+#if 0
+// use PCINT
 ISR(PCINT2_vect) {
+  nmiInterrupt();
+}
+#endif
+
+void nmiInterrupt() {
   if (detectNMI) {
     checkNMI();
   }
@@ -323,7 +359,7 @@ ISR(PCINT2_vect) {
 
 // Serial commands
 
-void ReadString()
+void readSerialString()
 {
   int i = 0;
   uint8_t c;
@@ -331,61 +367,66 @@ void ReadString()
   cmd_buffer[0] = 0;
   do
   {
-    if (Serial.available())
-    {
+    c = 0;
+    if (Serial.available()) {
       c = Serial.read();
-      if (c > 31)
-      {
-        cmd_buffer[i++] = c;
-        cmd_buffer[i] = 0;
-      }
+#if SECOND_SERIAL2
+      currentSerial = &Serial;
+    }
+    if (Serial2.available()) {
+      c = Serial2.read();
+      currentSerial = &Serial2;
+#endif
+    }
+    if (c > 31) {
+      cmd_buffer[i++] = c;
+      cmd_buffer[i] = 0;
     }
 
     if (i == 0) {
-      Serial.setTimeout(1);
+      SERIAL2.setTimeout(1);
       check_c64_input();
       if (cmd_buffer[0]) {
         break; // Command from playlist
       }
-
     } else {
-      Serial.setTimeout(1000);
+      SERIAL2.setTimeout(1000);
     }
   }
   while (c != 10 && c != 13);
 }
 
-bool TransferBytesToC64() // T<four byte hex address><size in hex>
+bool sc_TransferBytesToC64(const char *arg) // T<four byte hex address><size in hex>
 {
-  if (strlen(cmd_buffer) < 7) {
-    Serial.println("ERR");
+  if (strlen(arg) < 6) {
+    err = "ARGS";
     return false;
   }
-  char *p = cmd_buffer + 1;
+  const char *p = arg;
   uint16_t addr = HexToVal16(p); p += 4;
   uint8_t size = HexToVal(p); p += 2;
   return TransferBytesInC64(TO_C64_BUFFER1_ADDR, addr, size, TRANSFER_CMD_TRANSFER);
 }
 
-bool TransferBytesFromC64() // F<four byte hex address><size in hex>
+bool sc_TransferBytesFromC64(const char *arg) // F<four byte hex address><size in hex>
 {
-  if (strlen(cmd_buffer) < 7) {
-    Serial.println("ERR");
+  if (strlen(arg) < 6) {
+    err = "ARGS";
     return false;
   }
-  char *p = cmd_buffer + 1;
+  const char *p = arg;
   uint16_t addr = HexToVal16(p); p += 4;
   uint8_t size = HexToVal(p); p += 2;
   return TransferBytesInC64(addr, 0xdf00, size, TRANSFER_CMD_TRANSFER_2);
 }
 
-bool ReadDPRAM() // R<address><size in hex>  - read <size> bytes from DPRAM, beginning at <address> (in hex)
+bool sc_ReadDPRAM(const char *arg) // R<address><size in hex>  - read <size> bytes from DPRAM, beginning at <address> (in hex)
 {
-  if (strlen(cmd_buffer) < 7) {
-    Serial.println("ERR");
+  if (strlen(arg) < 6) {
+    err = "ARGS";
     return false;
   }
-  char *p = cmd_buffer + 1;
+  const char *p = arg;
   uint16_t addr = HexToVal16(p); p += 4;
   uint16_t size = HexToVal16(p); p += 4;
   while (size > 0) {
@@ -395,12 +436,12 @@ bool ReadDPRAM() // R<address><size in hex>  - read <size> bytes from DPRAM, beg
     size -= l;
     addr += l;
   }
-  Serial.println(":00000001FF");
+  SERIAL2.println(":00000001FF");
 
   return true;
 }
 
-bool WriteDPRAMHex() {
+bool sc_WriteDPRAMHex(const char *arg) {
   /*
     1.  Start code, one character, an ASCII colon ':'.
     2.  uint8_t count, two hex digits (one hex digit pair), indicating the number of bytes (hex digit pairs) in the data field. The maximum uint8_t count is 255 (0xFF). 16 (0x10) and 32 (0x20) are commonly used uint8_t counts.
@@ -411,17 +452,17 @@ bool WriteDPRAMHex() {
   */
 
   uint8_t chksum = 0, b;
-  char *p = cmd_buffer + 1;
 
-  int slen = strlen((const char *)cmd_buffer);
-  if (slen < 10) {
-    Serial.println("ERR way too short line");
+  int slen = strlen(arg);
+  if (slen < 9) {
+    err = "WAY TOO SHORT";
     return false;
   }
 
+  const char *p = arg;
   uint8_t size = HexToVal(p); p += 2;
   if (slen < 1 + 10 + 2 * size) {
-    Serial.println("ERR too short line");
+    err = "TOO SHORT";
     return false;
   }
   chksum += size;
@@ -441,11 +482,12 @@ bool WriteDPRAMHex() {
   b = HexToVal(p); p += 2;
   chksum += b;
   if (chksum) {
-    Serial.print("ERR ");
-    Serial.print(b, HEX);
-    Serial.print(" ");
-    Serial.print(chksum, HEX);
-    Serial.println("");
+    err = "CHECKSUM";
+    DEBUG("Checksum error ");
+    DEBUG(b);
+    DEBUG(" ");
+    DEBUG(chksum);
+    DEBUG("");
     return false;
   }
   // TODO handle other record types
@@ -455,17 +497,17 @@ bool WriteDPRAMHex() {
   return record_type == 1; // Return true for END
 }
 
-bool WriteDPRAM() // W<four byte address>:<data in hex, two characters per byte, max of 16 bytes per line>
+bool sc_WriteDPRAM(const char *arg) // W<four byte address>:<data in hex, two characters per byte, max of 16 bytes per line>
 {
-  if (strlen(cmd_buffer) < 8) {
-    Serial.println("ERR");
+  if (strlen(arg) < 7) {
+    err = "ARGS";
     return false;
   }
-  char *p = cmd_buffer + 1;
+  const char *p = arg;
   uint16_t addr = HexToVal16(p); p += 4;
   // cmd_buffer[x] should now be a :
   if (p[0] != ':') {
-    Serial.println("ERR");
+    err = "ARGS";
     return false;
   }
   p++;
@@ -485,11 +527,12 @@ bool WriteDPRAM() // W<four byte address>:<data in hex, two characters per byte,
     if (our_checksum != checksum) {
       // checksum fail!
       iBufferUsed = -1;
-      Serial.print("ERR ");
-      Serial.print(checksum, HEX);
-      Serial.print(" ");
-      Serial.print(our_checksum, HEX);
-      Serial.println("");
+      err = "CHECKSUM";
+      DEBUG("Checksum error ");
+      DEBUG(checksum);
+      DEBUG(" ");
+      DEBUG(our_checksum);
+      DEBUGLN("");
       return false;
     }
   }
@@ -500,6 +543,45 @@ bool WriteDPRAM() // W<four byte address>:<data in hex, two characters per byte,
   }
 
   return (iBufferUsed > -1);
+}
+
+bool sc_runBasic(const char *arg) {
+  runBasic();
+  return true;
+}
+
+bool sc_loadControl(const char *arg) {
+  return loadControlSD() || loadControl();
+}
+
+bool sc_loadBrowser(const char *arg) {
+  return loadBrowser();
+}
+
+bool sc_quickLoad(const char *arg) {
+  return loadFileSD("BOULDE~2.PRG"); // for quick testing
+  //return listD64("still_strong.d64"); // for quick testing
+}
+
+
+bool sc_fastReset(const char *arg) {
+  return fastReset();
+}
+
+bool sc_RESET(const char *arg) {
+  return RESET();
+}
+
+bool sc_NMI(const char *arg) {
+  return NMI();
+}
+
+bool sc_GAME(const char *arg) {
+  return GAME((arg[0] & 1) ? HIGH : LOW);
+}
+
+bool sc_EXROM(const char *arg) {
+  return EXROM((arg[0] & 1) ? HIGH : LOW);
 }
 
 // ----------------------------------------------------------------------------------------
@@ -631,26 +713,26 @@ void WriteByteTo(uint16_t addr, uint8_t b)
 void PrintBufferHex(int addr, int size)
 {
   uint8_t chk = size + addr + (addr >> 8);
-  Serial.print(':');
+  SERIAL2.print(':');
 
-  Serial.print(hexa[ (size & 0xF0) >> 4 ]);
-  Serial.print(hexa[ (size & 0x0F)      ]);
-  Serial.print(hexa[ (addr & 0xF000) >> 12 ]);
-  Serial.print(hexa[ (addr & 0x0F00) >> 8 ]);
-  Serial.print(hexa[ (addr & 0x00F0) >> 4 ]);
-  Serial.print(hexa[ (addr & 0x000F)      ]);
-  Serial.print("00"); // Record type DATA
+  SERIAL2.print(hexa[ (size & 0xF0) >> 4 ]);
+  SERIAL2.print(hexa[ (size & 0x0F)      ]);
+  SERIAL2.print(hexa[ (addr & 0xF000) >> 12 ]);
+  SERIAL2.print(hexa[ (addr & 0x0F00) >> 8 ]);
+  SERIAL2.print(hexa[ (addr & 0x00F0) >> 4 ]);
+  SERIAL2.print(hexa[ (addr & 0x000F)      ]);
+  SERIAL2.print("00"); // Record type DATA
 
   for (int x = 0; x < size; ++x) {
-    Serial.print(hexa[ (buffer[x] & 0xF0) >> 4 ]);
-    Serial.print(hexa[ (buffer[x] & 0x0F)      ]);
+    SERIAL2.print(hexa[ (buffer[x] & 0xF0) >> 4 ]);
+    SERIAL2.print(hexa[ (buffer[x] & 0x0F)      ]);
     chk = chk + buffer[x];
   }
 
   chk = -chk;
-  Serial.print(hexa[ (chk & 0xF0) >> 4 ]);
-  Serial.print(hexa[ (chk & 0x0F)      ]);
-  Serial.println("");
+  SERIAL2.print(hexa[ (chk & 0xF0) >> 4 ]);
+  SERIAL2.print(hexa[ (chk & 0x0F)      ]);
+  SERIAL2.println("");
 }
 
 void PrintBuffer(int size)
@@ -659,15 +741,15 @@ void PrintBuffer(int size)
 
   for (int x = 0; x < size; ++x)
   {
-    Serial.print(hexa[ (buffer[x] & 0xF0) >> 4 ]);
-    Serial.print(hexa[ (buffer[x] & 0x0F)      ]);
+    SERIAL2.print(hexa[ (buffer[x] & 0xF0) >> 4 ]);
+    SERIAL2.print(hexa[ (buffer[x] & 0x0F)      ]);
     chk = chk ^ buffer[x];
   }
 
-  Serial.print(",");
-  Serial.print(hexa[ (chk & 0xF0) >> 4 ]);
-  Serial.print(hexa[ (chk & 0x0F)      ]);
-  Serial.println("");
+  SERIAL2.print(',');
+  SERIAL2.print(hexa[ (chk & 0xF0) >> 4 ]);
+  SERIAL2.print(hexa[ (chk & 0x0F)      ]);
+  SERIAL2.println("");
 }
 
 uint8_t CalcBufferChecksum(int size)
@@ -812,13 +894,14 @@ bool fastReset() {
 
 // SD commands
 
-void initSD() {
+bool initSD() {
   if (!SD.begin(kPin_nSD_SEL, SPI_FULL_SPEED)) {
-    Serial.println("SD initialization failed!");
-    // while (1); // FIXME should not be mandatory
-  } else {
-    Serial.println("SD initialization done.");
+    err = "SD INIT FAILED";
+    DEBUGLN("SD initialization failed!");
+    return false;
   }
+  DEBUGLN("SD initialization done.");
+  return true;
 }
 
 bool loadControl() {
@@ -851,6 +934,7 @@ bool loadControl() {
 bool loadControlSD() {
   File control = SD.open("control.bin", FILE_READ);
   if (!control) {
+    err = "FILE NOT FOUND";
     return false;
   }
   uint16_t addr = 0x000;
@@ -917,12 +1001,13 @@ bool loadBrowser() {
 
 bool loadFileSD(const char *filename) {
   initSD();
-  if (!filename || !*filename)
+  if (!filename || !*filename) {
     filename = "browser.prg";
+  }
 
   File dataFile = SD.open(filename);
   if (!dataFile) {
-    Serial.println("ERR File not found error");
+    err = "FILE NOT FOUND";
     return false;
   }
   uint16_t addr = dataFile.read() + (dataFile.read() << 8);
@@ -970,7 +1055,7 @@ bool loadFileSD(const char *filename) {
     //Verify
     dataFile = SD.open(filename);
     if (!dataFile) {
-      Serial.println("ERR File not found error");
+      err = "FILE NOT FOUND";
       return false;
     }
     addr = dataFile.read() + (dataFile.read() << 8);
@@ -989,9 +1074,9 @@ bool loadFileSD(const char *filename) {
       {
         uint8_t b = ReadByteFrom(0xdf00 + x);
         if (b != buffer[x]) {
-        Serial.print("VERIFY ERROR ");
-        Serial.print(addr);
-        Serial.print(" : ");
+        DEBUG("VERIFY ERROR ");
+        DEBUG(addr);
+        DEBUG(" : ");
         DEBUGLN(x);
         }
       }
@@ -1014,8 +1099,27 @@ void setBasicEnd(uint16_t addr) {
   TransferBytesInC64(TO_C64_BUFFER1_ADDR, 0x2d, 6, TRANSFER_CMD_TRANSFER);
 }
 
-void listFiles() {
-  changeDir(".");
+//
+
+bool sc_absoluteFile(const char *arg) {
+  int len = strlen(arg);
+  if (len > 3 && !strcmp(arg + len - 3, ".ic")) {
+    return startPlaylist(arg);
+  }
+  fastReset();
+  return (loadFileSD(arg) && runBasic());
+}
+
+
+bool sc_pwd(const char *arg) {
+  SERIAL2.println(currentPath);
+  return true;
+}
+
+bool sc_listFiles(const char *arg) {
+  if (!changeDir(".")) {
+    return false;
+  }
   while (true) {
 
     File entry =  currentDir.openNextFile();
@@ -1023,17 +1127,30 @@ void listFiles() {
       break;
     }
     entry.getName((char*)buffer, 22);
-    Serial.print((char*)buffer);
+    SERIAL2.print((char*)buffer);
     if (entry.isDirectory()) {
-      Serial.println("\t\tDIR");
+      SERIAL2.println("\t\tDIR");
     } else {
       // files have sizes, directories do not
-      Serial.print("\t\t");
-      //Serial.println(entry.getSize(), DEC);
-      Serial.println(entry.size(), DEC);
+      SERIAL2.print("\t\t");
+      //SERIAL2.println(entry.getSize(), DEC);
+      SERIAL2.println(entry.size(), DEC);
     }
     entry.close();
   }
+  return true;
+}
+
+bool sc_tree(const char *arg) {
+    root = SD.open("/");
+    if (!root) {
+      err = "FILE NOT FOUND";
+      return false;
+    }
+    buffer[0] = '/';
+    tree(root, (char*)buffer + 1, (char*)buffer);
+    root.close();
+    return true;
 }
 
 void tree(File dir, char *p, char *buffer) {
@@ -1046,25 +1163,24 @@ void tree(File dir, char *p, char *buffer) {
       break;
     }
     entry.getName(p, 22);
-    Serial.print(buffer);
+    SERIAL2.print(buffer);
     if (entry.isDirectory()) {
-      Serial.println("/");
+      SERIAL2.println("/");
       strcat (p, "/");
       tree(entry, p + strlen(p), buffer);
     } else {
       // files have sizes, directories do not
-      //Serial.print(entry.size(), DEC);
-      Serial.println();
+      //SERIAL2.print(entry.size(), DEC);
+      SERIAL2.println();
     }
     entry.close();
   }
 }
 
-bool removeFileSD(const char *filename) {
+bool sc_removeFileSD(const char *filename) {
   char newPath[PATH_MAX];
   makeFilePath(newPath, filename);
   if (!SD.remove(newPath)) {
-    Serial.println("ERROR");
     return false;
   }
   return true;
@@ -1086,7 +1202,9 @@ void init_c64() {
   endDPRAMWrite();
   currentPath[0] = 0;
 
-  initSD();
+  if (!initSD()) {
+    return;
+  }
   changeDir(".");
   loadControlSD() || loadControl();
 }
@@ -1143,7 +1261,8 @@ void check_NMI() {
   DEBUG("RESTORE * 3 - LOADING BROWSER ");
   DEBUGLN(NMICount);
   sw1 = sw2 = false;
-  NMICount = lastNMITime = 0;
+  NMICount = 0;
+  lastNMITime = 0;
   endPlaylist();
   loadControlSD() || loadControl();
   fastReset();
@@ -1191,21 +1310,21 @@ void check_c64_input() {
 
 // XModem
 
-int recvChar(int) {
+int recvCharX(int) {
   for (int i = 0; i < 100000; i++) {
-    if (Serial.available()) {
-      int c =  Serial.read();
+    if (SERIAL2.available()) {
+      int c = SERIAL2.read();
       return c;
     }
   }
   return -1;
 }
 
-void sendChar(char c) {
-  Serial.write(c);
+void sendCharX(char c) {
+  SERIAL2.write(c);
 }
 
-bool recvDataHandler(unsigned long offset, char* data, int size) {
+static bool recvDataHandlerX(unsigned long offset, char* data, int size) {
   if (maxSize && currentSize + size > maxSize) {
     size = maxSize - currentSize;
   }
@@ -1215,7 +1334,7 @@ bool recvDataHandler(unsigned long offset, char* data, int size) {
   return len > 0;
 }
 
-bool recvFileX(const char *filename) {
+bool sc_recvFileX(const char *filename) {
   char newPath[PATH_MAX];
   makeFilePath(newPath, filename);
 
@@ -1234,22 +1353,22 @@ bool recvFileX(const char *filename) {
 
   recvFile2 = SD.open(newPath, FILE_WRITE);
   if (!recvFile2) {
-    Serial.println("ERR Directory or something not found error");
+    err = "FILE NOT FOUND";
     return false;
   }
 
-  Serial.setTimeout(1000);
-  XModem xm(recvChar, sendChar, recvDataHandler);
+  SERIAL2.setTimeout(1000);
+  XModem xm(recvCharX, sendCharX, recvDataHandlerX);
   bool result = xm.receive();
   recvFile2.close();
   if (!result) {
     SD.remove(newPath);
-    Serial.println("ERR in transfer");
+    err = "TRANSFER";
   }
   return result;
 }
 
-bool sendDataHandler(unsigned long offset, char* data, int size) {
+bool sendDataHandlerX(unsigned long offset, char* data, int size) {
   int len = sendFile2.read(data, size);
   if (len > 0 && len < size) {
     memset(data + len, 0, size - len);
@@ -1259,30 +1378,30 @@ bool sendDataHandler(unsigned long offset, char* data, int size) {
   return len > 0;
 }
 
-bool sendFileX(const char *filename) {
+bool sc_sendFileX(const char *filename) {
   char newPath[PATH_MAX];
   makeFilePath(newPath, filename);
   sendFile2 = SD.open(newPath, FILE_READ);
   if (!sendFile2) {
-    Serial.println("ERR File not found error");
+    err = "FILE NOT FOUND";
     return false;
   }
-  Serial.print("rx ");
-  Serial.print(newPath);
-  Serial.print(" ");
-  Serial.println(sendFile2.fileSize());
+  SERIAL2.print("rx ");
+  SERIAL2.print(newPath);
+  SERIAL2.print(" ");
+  SERIAL2.println(sendFile2.fileSize());
 
-  Serial.setTimeout(1000);
-  XModem xm(recvChar, sendChar, sendDataHandler);
+  SERIAL2.setTimeout(1000);
+  XModem xm(recvCharX, sendCharX, sendDataHandlerX);
   bool result = xm.transmit();
   sendFile2.close();
   if (!result) {
-    Serial.println("ERR in transfer");
+    err = "TRANSFER";
   }
   return result;
 }
 
-bool loadDataHandler(unsigned long offset, char* data, int size) {
+static bool loadDataHandlerX(unsigned long offset, char* data, int size) {
   if (maxSize && currentSize + size > maxSize) {
     size = maxSize - currentSize;
   }
@@ -1326,14 +1445,14 @@ bool loadFileX(const char *params) {
   long before = millis();
 
   EXROM(LOW);
-  Serial.setTimeout(1000);
-  XModem xm(recvChar, sendChar, loadDataHandler);
+  SERIAL2.setTimeout(1000);
+  XModem xm(recvCharX, sendCharX, loadDataHandlerX);
   bool result = xm.receive();
   if (!result) {
-    Serial.println("ERR in transfer");
+    err = "TRANSFER";
   } else {
-    Serial.print("OK ");
-    Serial.print(loadAddr);
+    DEBUG("OK ");
+    DEBUG(loadAddr);
     setBasicEnd(loadAddr);
   }
   delay(2);
@@ -1456,32 +1575,34 @@ void endPlaylist() {
   }
 }
 
-bool playlistAutoSleep(int s) {
-  autoSleep = s;
+bool sc_playlistAutoSleep(const char *s) {
+  autoSleep = atoi(s);
   return true;
 }
 
-bool playlistSleep(int s) {
+bool sc_playlistSleep(const char *s) {
   if (!nextPlay) {
+    err = "NO NEXT";
     return false;
   }
-  nextPlay = millis() + s * 1000L;
+  nextPlay = millis() + atoi(s) * 1000L;
   DEBUG("Sleeping for ");
   DEBUGLN(s);
   return true;
 }
 
-void startPlaylist(const char *filename) {
+bool startPlaylist(const char *filename) {
   endPlaylist();
 
   playlistFile = SD.open(filename);
   if (!playlistFile) {
-    DEBUGLN("Cannot open playlist");
-    return;
+    err = "FILE NOT FOUND";
+    return false;
   }
   nextPlay = millis();
   DEBUG("Start playlist ");
   DEBUGLN(filename);
+  return true;
 }
 
 void handlePlaylist() {
@@ -1535,30 +1656,33 @@ bool changeDir(const char *path) {
     strcpy(newPath, "/");
   }
 
+  bool ok = true;
   File newDir = SD.open(newPath);
   if (!newDir) {
     // cd into D64 image
     strcat(newPath, ".d64");
     //newDir = SD.open(newPath);
     if (!SD.exists(newPath)) {
-      Serial.println("ERR DIR NOT FOUND");
+      err = "DIR NOT FOUND";
       return false;
     }
     // Target is a D64 image
     if (!di_load_image(&di, newPath)) {
-      Serial.println("ERR di_load_image failed");
+      err = "di_load_image FAILED";
       return false;
     }
 
     /* Open directory for reading */
     if (!di_open(&di, &dh, (unsigned char *) "$", T_PRG, "rb")) {
-      Serial.println("ERR Couldn't open directory");
+      ok = false;
+      err = "CANNOT OPEN DIRECTORY";
       goto CloseImage;
     }
 
     /* Read first block into buffer */
     if (di_read(&dh, buffer, 254) != 254) {
-      Serial.println("ERR BAM read failed");
+      ok = false;
+      err = "BAM READ FAILED";
       goto CloseDir;
     }
 
@@ -1588,7 +1712,7 @@ CloseImage:
   currentDir = newDir;
   strcpy(currentPath, newPath);
   DEBUGLN(currentPath);
-  return true;
+  return ok;
 }
 
 // ----------------------------------------------------------------------------------------
@@ -1650,20 +1774,22 @@ static bool listD64(const char *filename) {
   int track, sector;
 
   if (!SD.exists(filename)) {
-    Serial.print("ERR FILE NOT FOUND ERROR ");
-    Serial.println((char*)filename);
+    err = "FILE NOT FOUND";
+    DEBUGLN((char*)filename);
     return false;
   }
 
   /* Load image into ram */
   if (!di_load_image(&di, filename)) {
-    Serial.println("ERR di_load_image failed");
-    return (1);
+    err = "di_load_image FAILED";
+    return false;
   }
 
+  bool ok = true;
   /* Open directory for reading */
   if (!di_open(&di, &dh, (unsigned char *) "$", T_PRG, "rb")) {
-    Serial.println("ERR Couldn't open directory");
+    ok = false;
+    err = "CANNOT OPEN DIRECTORY";
     goto CloseImage;
   }
   /* Convert title to ascii */
@@ -1676,13 +1802,14 @@ static bool listD64(const char *filename) {
   ptoa(id);
 
   /* Print title and disk ID */
-  Serial.println(name);
-  Serial.println(id);
+  SERIAL2.println(name);
+  SERIAL2.println(id);
   //printf("0 \"%-16s\" %s\n", name, id);
 
   /* Read first block into buffer */
   if (di_read(&dh, buffer, 254) != 254) {
-    Serial.println("ERR BAM read failed");
+    ok = false;
+    err = "BAM READ FAILED";
     goto CloseDir;
   }
 
@@ -1707,19 +1834,19 @@ static bool listD64(const char *filename) {
         sprintf(quotename, "\"%s\"", name);
 
         /* Print directory entry */
-        Serial.print(size);
-        Serial.print(",");
-        Serial.print(quotename);
-        Serial.print(",");
-        Serial.print(closed);
-        Serial.print(",");
-        Serial.print(ftype[type]);
-        Serial.print(",");
-        Serial.print(locked);
-        Serial.print(",");
-        Serial.print(track);
-        Serial.print(",");
-        Serial.println(sector);
+        SERIAL2.print(size);
+        SERIAL2.print(',');
+        SERIAL2.print(quotename);
+        SERIAL2.print(',');
+        SERIAL2.print(closed);
+        SERIAL2.print(',');
+        SERIAL2.print(ftype[type]);
+        SERIAL2.print(',');
+        SERIAL2.print(locked);
+        SERIAL2.print(',');
+        SERIAL2.print(track);
+        SERIAL2.print(',');
+        SERIAL2.println(sector);
 
 
         //printf("%-4d  %-18s%c%s%c  <%2d,%2d>\n", size, quotename, closed ? ' ' : '*', ftype[type], locked ? '<' : ' ', track, sector);
@@ -1727,8 +1854,8 @@ static bool listD64(const char *filename) {
     }
   }
   /* Print number of blocks free */
-  Serial.print(di.blocksfree);
-  Serial.println("blocks free");
+  SERIAL2.print(di.blocksfree);
+  SERIAL2.println("blocks free");
 
 
 CloseDir:
@@ -1739,9 +1866,7 @@ CloseImage:
   /* Release image */
   di_free_image(&di);
 
-
-  return true;
-
+  return ok;
 }
 
 
@@ -1763,8 +1888,7 @@ bool loadD64File(const char *filename) {
   /* Open file for reading */
   if (!di_open(&di, &dh, rawname, T_PRG, "rb")) {
     di_status(&di, (char*)buffer);
-    Serial.print("ERR ");
-    Serial.println((const char*)buffer);
+    err = ((const char*)buffer);
     return false;
   }
 
@@ -1811,10 +1935,14 @@ bool loadD64File(const char *filename) {
 static void cmdSelectFileD64(DirElement *element) {
   if (element->type == FILE_PRG) {
     // FIXME check if file is present
+    err = 0;
     fastReset();
     printText("LOADING ");
     printText(element->name);
     if (!loadD64File(element->name)) {
+      if (err) {
+        printText(err);
+      }
       return;
     }
     runBasic();
@@ -1855,8 +1983,8 @@ static void cmdSelectFile(DirElement *element) {
     loadFileSD(newPath);
     runBasic();
   } else {
-    Serial.print("FILE NOT FOUND ERROR ");
-    Serial.println((char*)newPath);
+    printText("FILE NOT FOUND ");
+    printText((char*)newPath);
   }
 }
 
@@ -1911,17 +2039,17 @@ bool cmdReadDirD64(DirElement *current) { // Current points to buffer
 
     /* Print directory entry */
     DEBUG(size);
-    DEBUG(",");
+    DEBUG(',');
     DEBUG(name);
-    DEBUG(",");
+    DEBUG(',');
     DEBUG(closed);
-    DEBUG(",");
+    DEBUG(',');
     DEBUG(ftype[type]);
-    DEBUG(",");
+    DEBUG(',');
     DEBUG(locked);
-    DEBUG(",");
+    DEBUG(',');
     DEBUG(track);
-    DEBUG(",");
+    DEBUG(',');
     DEBUGLN(sector);
 
 
