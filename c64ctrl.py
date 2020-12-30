@@ -36,7 +36,8 @@ parser = argparse.ArgumentParser(
             rm <file> - Remove file in SD
             send <file> - Send file to SD
             recv <file> - Receive file from SD
-            <file> - Load and run PRG file in C64
+            <file> - Send and run PRG file in C64
+            /<file> - Load PRG file from SD and run it in C64
          '''))
 parser.add_argument("-V", "--version", help="version", action="store_true")
 parser.add_argument("-d", "--debug", help="debug", action="store_true")
@@ -46,7 +47,7 @@ parser.add_argument("-a", type=int, help="start address", default = None)
 parser.add_argument("-c", type=int, help="count", default = 1024)
 parser.add_argument("-f", help="file parameter for read DPRAM", default = False)
 
-parser.add_argument("-r", help="read DPRAM to terminal or file")
+parser.add_argument("-r", help="read DPRAM to file or stdout(-)")
 parser.add_argument("-v", type=argparse.FileType("rb"), help="verify DPRAM with file.bin")
 parser.add_argument("-w", type=argparse.FileType("rb"), help="write DPRAM with file.bin")
 
@@ -61,34 +62,8 @@ parser.add_argument('args', nargs=argparse.REMAINDER, help="commands or *.prg")
 parser.add_argument("-moncommands", help="ignore vice command")
 parser.add_argument("-autostartprgmode", type=int, help="ignore vice command")
 
-opts = parser.parse_args()
-
-ser = serial.Serial(opts.port, 115200, timeout=0.5)
-time.sleep(1.0) # Opening serial port boots the Arduino
-# stty -F /dev/ttyUSB0 -hupcl
-
-while True:
-    s = ser.readline()
-    if opts.debug:
-        print('<', repr(s))
-    if s is None or len(s) == 0:
-        break
-
 RECSIZE = 16
 NL = chr(10)
-
-dumpstart = -1
-dumpend = -1
-
-def calcwritelineHex(a, l):
-    ck = len(l) + a + (a >> 8) 
-    s = ":" + ("%02x" % len(l)) + ("%04x" % a) + "00"
-    for c in l:
-        s = s + ("%02x" % c)
-        ck = ck + c
-    ck = (-ck) & 0xff
-    s = s + ("%02x" % ck)
-    return s.upper()
 
 def calcwriteline(a, l):
     ck = 0
@@ -103,42 +78,15 @@ def calcwriteline(a, l):
     s = s + "," + ("%02x" % ck)
     return s.upper()
 
-def send_cmd(s):
-    if opts.debug:
-        print('>', repr(s))
-    ser.write((s + NL).encode())
-
-def recv_answer():
-    s = ser.readline()
-    s = s.decode()
-    if opts.debug:
-        print('<', repr(s))
-    s = s.strip()
-    return s
-    
-def cmd(s, w=False):
-    send_cmd(s)
-    if w:
-        s = waitokay()
-    else:
-        for i in range(50):
-            s = recv_answer()
-            if s != '':
-                break
-    return s
-
-def waitokay():
-    bad = 0
-    while True:
-        s = recv_answer()
-        if s == "OK":
-            return s
-        if s.startswith('ERR'):
-            sys.exit(s)
-        else:
-            bad = bad + 1
-        if bad > 50:
-            sys.exit("\nTIMEOUT")
+def calcwritelineHex(a, l):
+    ck = len(l) + a + (a >> 8) 
+    s = ":" + ("%02x" % len(l)) + ("%04x" % a) + "00"
+    for c in l:
+        s = s + ("%02x" % c)
+        ck = ck + c
+    ck = (-ck) & 0xff
+    s = s + ("%02x" % ck)
+    return s.upper()
 
 def parseRecord(l):
     rom = bytes.fromhex(l[1:].strip())
@@ -148,18 +96,79 @@ def parseRecord(l):
     val = rom[-1]
     ck = ck & 0xff
     if (ck):
-        sys.exit("chksum " + str(val) + "!" + str(ck))
+        raise Exception("chksum " + str(val) + "!" + str(ck))
     return rom[4:-1]
 
-def read_ram(dumpstart, count, f):
-    l = cmd("R%04x%04x" % (dumpstart, count))
+class C64Ctrl:
+
+ def __init__(self, serialclient = None, **kwargs):
+    ''' Initialize a serial client instance
+    '''
+    self.debug = kwargs.get('debug', False)
+    if serialclient == None:
+        port = kwargs.get('port', '/dev/ttyUSB0')
+        baudrate = kwargs.get('baudrate', 115200)
+        # Prevent Arduino boot
+        os.system('stty -F ' + port + ' -hupcl')
+        self.ser = serial.Serial(port, baudrate, timeout=0.5)
+    else:
+        self.ser = serialclient
+    #time.sleep(1.0) # Opening serial port boots the Arduino
+
+    while True:
+        s = self.ser.readline()
+        if self.debug:
+            print('<', repr(s))
+        if s is None or len(s) == 0:
+            break
+
+ def send_cmd(self, s):
+    if self.debug:
+        print('>', repr(s))
+    self.ser.write((s + NL).encode())
+
+ def recv_answer(self):
+    s = self.ser.readline()
+    s = s.decode()
+    if self.debug:
+        print('<', repr(s))
+    s = s.strip()
+    return s
+    
+ def cmd(self, s, w=False):
+    self.send_cmd(s)
+    if w:
+        s = self.waitokay()
+    else:
+        for i in range(50):
+            s = self.recv_answer()
+            if s != '':
+                break
+    return s
+
+ def waitokay(self):
+    bad = 0
+    while True:
+        s = self.recv_answer()
+        if s == "OK":
+            return s
+        if s.startswith('ERR'):
+            raise Exception(s)
+        print(s)
+        if s == '':
+            bad = bad + 1
+        if bad > 50:
+            raise Exception("TIMEOUT")
+
+ def read_ram(self, dumpstart, count, f):
+    l = self.cmd("R%04x%04x" % (dumpstart, count))
     while True:
         if l == '':
-            l = recv_answer()
+            l = self.recv_answer()
         if l.startswith('OK'):
             return l
         if l.startswith('ERR'):
-            sys.exit(l)
+            raise Exception(l)
         #if l == ':00000001FF':
         #    print l
 
@@ -178,13 +187,13 @@ def read_ram(dumpstart, count, f):
     if f:
         print()
 
-def write_ramOld(a, f):
+ def write_ramOld(self, a, f):
     while True:
         l = f.read(16)
         if len(l) == 0:
             break
         s = calcwriteline(a, l)
-        if opts.debug != True:
+        if self.debug != True:
             print(s, "\n", end='')
             sys.stdout.flush()
         cmd(s, True);
@@ -194,24 +203,24 @@ def write_ramOld(a, f):
     f.close()
     print()
 
-def write_ram(a, f):
+ def write_ram(self, a, f):
     while True:
         l = f.read(RECSIZE)
         if len(l) == 0:
             break
         s = calcwritelineHex(a, l)
-        if opts.debug != True:
+        if self.debug != True:
             print(s, "\n", end='')
             sys.stdout.flush()
-        send_cmd(s)
+        self.send_cmd(s)
         if len(l) != RECSIZE:
             break
         a = a + RECSIZE
-    cmd(":00000001FF", True);
+    self.cmd(":00000001FF", True);
     f.close()
     print()
 
-def verify_ram(f, a):
+ def verify_ram(self, f, a):
     badcount = 0
     while True:
         r = f.read(RECSIZE)
@@ -219,11 +228,11 @@ def verify_ram(f, a):
             break
         okay = 1
 
-        l = cmd("R%04x%04x" % (a, RECSIZE))
-        waitokay()
+        l = self.cmd("R%04x%04x" % (a, RECSIZE))
+        self.waitokay()
         rom = parseRecord(l)
-        print(l, "ROM", "\r", end='')
-        if opts.debug:
+        print(l, "RAM", "\r", end='')
+        if self.debug:
             print()
         sys.stdout.flush()
 
@@ -242,7 +251,7 @@ def verify_ram(f, a):
             print(markt)
             print(filet, end='')
             print("MISMATCH!!")
-            #sys.exit()
+            #raise Exception()
 
         if len(r) != RECSIZE:
             break
@@ -252,8 +261,9 @@ def verify_ram(f, a):
     print()
     print(badcount, "errors!")
     f.close()
+    return False
 
-def load_prg(f, addr): # Slow load row by row
+ def load_prg(self, f, addr): # Slow load row by row
     print('LOAD ADDRESS', addr)
     while True:
         l = f.read(RECSIZE)
@@ -261,10 +271,10 @@ def load_prg(f, addr): # Slow load row by row
         if size == 0:
             break
         s = calcwriteline(0x100, l)
-        cmd(s, True);
+        self.cmd(s, True);
         print('LOAD ADDRESS', addr, size, '\r', end='')
         sys.stdout.flush()
-        cmd("T%04x%02x" % (addr, size), True)
+        self.cmd("T%04x%02x" % (addr, size), True)
         addr = addr + size
         if size != RECSIZE:
             break
@@ -272,26 +282,37 @@ def load_prg(f, addr): # Slow load row by row
     # Update basic pointers
     l = bytes([addr & 0xff, addr >> 8, addr & 0xff, addr >> 8, addr & 0xff, addr >> 8])
     s = calcwriteline(0x100, l)
-    cmd(s, True);
-    cmd("T%04x%02x" % (0x2d, len(l)), True)
+    self.cmd(s, True);
+    self.cmd("T%04x%02x" % (0x2d, len(l)), True)
     f.close()
     time.sleep(0.1)
-    cmd('EXROM=1') # EXROM off
+    self.cmd('EXROM=1') # EXROM off
     print()
 
-def getc(size, timeout=5):
-    r, w, e = select.select([ser.fileno()], [], [], timeout)
+ def setBasicEnd(self, addr):
+    print('LOAD ADDRESS', addr)
+    # Update basic pointers
+    l = bytes([addr & 0xff, addr >> 8, addr & 0xff, addr >> 8, addr & 0xff, addr >> 8])
+    s = calcwriteline(0x100, l)
+    self.cmd(s, True);
+    self.cmd("T%04x%02x" % (0x2d, len(l)), True)
+    print()
+
+ # XModem methods
+
+ def getc(self, size, timeout=5):
+    r, w, e = select.select([self.ser.fileno()], [], [], timeout)
     if r:
-        data = ser.read(size)
+        data = self.ser.read(size)
         return data
         
-def putc(data, timeout=1):
-    r, w, e = select.select([], [ser.fileno()], [], timeout)
-    if w: return ser.write(data)
+ def putc(self, data, timeout=1):
+    r, w, e = select.select([], [self.ser.fileno()], [], timeout)
+    if w: return self.ser.write(data)
 
-def recvFileX(filename):
-    send_cmd("sx "+ filename)
-    answer = recv_answer()
+ def recvFileX(self, filename):
+    self.send_cmd("sx "+ filename)
+    answer = self.recv_answer()
     toks = answer.split(' ') # Don't use spaces in filenames
     if len(toks) != 3 or toks[0] != 'rx':
         print("<", answer)
@@ -301,250 +322,209 @@ def recvFileX(filename):
     filename = os.path.basename(filename)
     print("RECEIVE", filename)
     stream = open(filename, 'wb')
-    modem = XMODEM(getc, putc)
+    modem = XMODEM(self.getc, self.putc)
     modem.recv(stream)
     if size:
         stream.truncate(size)
-    answer = recv_answer()
+    answer = self.recv_answer()
     if answer != 'OK':
         print("Error", repr(answer))
         return
 
-def sendFileX(filename):
-    # FIXME check file exists
+ def sendFileX(self, filename):
     stream = open(filename, 'rb')
     size = os.stat(filename).st_size
     filename = os.path.basename(filename)
     print("SEND", filename, size)
-    send_cmd("rx "+ filename + " " + str(size))
-    modem = XMODEM(getc, putc)
+    self.send_cmd("rx "+ filename + " " + str(size))
+    modem = XMODEM(self.getc, self.putc)
     modem.send(stream)
-    answer = recv_answer()
+    answer = self.recv_answer()
     if answer != 'OK':
         print("Error", repr(answer))
         return
 
-def loadFileX(filename):
-    # FIXME check file exists
+ def loadFileX(self, filename, a):
     size = os.stat(filename).st_size
     f = open(filename, 'rb')
     # size = os.fstat(f.fileno()).st_size
-    a = opts.a
     if a is None:
         l = f.read(2)
         addr = l[0] + (l[1] << 8)
     else:
         addr = a
     print("LOAD", filename, addr, size)
-    send_cmd("loadx "+ str(addr) + " " + str(size))
-    answer = recv_answer()
+    self.send_cmd("loadx "+ str(addr) + " " + str(size))
+    answer = self.recv_answer()
     print("<", answer)
-    modem = XMODEM(getc, putc)
+    modem = XMODEM(self.getc, self.putc)
     modem.send(f)
     f.close()
-    answer = recv_answer()
+    answer = self.recv_answer()
     if answer.startswith('ERR'):
         print("Error", repr(answer))
         return
     print(answer)
     return addr + size
 
-def setBasicEnd(addr):
-    print('LOAD ADDRESS', addr)
-    # Update basic pointers
-    l = bytes([addr & 0xff, addr >> 8, addr & 0xff, addr >> 8, addr & 0xff, addr >> 8])
-    s = calcwriteline(0x100, l)
-    cmd(s, True);
-    cmd("T%04x%02x" % (0x2d, len(l)), True)
-    print()
-
 #
 #
 #
 
-if opts.version:
-    print(cmd('V'))
-    sys.exit()
+def main():
 
-#s = sys.argv[0]
+    opts = parser.parse_args()
+    c64 = C64Ctrl(port = opts.port, debug = opts.debug)
 
-if opts.debug:
-    tools.log.setLevel(1)
-else:
-    tools.log.setLevel(11)
+    if opts.version:
+        print(c64.cmd('V'))
+        sys.exit()
+
+    #s = sys.argv[0]
+
+    if opts.debug:
+        tools.log.setLevel(1)
+    else:
+        tools.log.setLevel(11)
     
-if opts.r:
-    dumpstart = opts.a
-    count = int(opts.r)
-    if opts.f:
-        f = open(opts.f, 'wb')
-    else:
-        f = False
-    read_ram(dumpstart, count, f)
+    if opts.r:
+        a = opts.a or 0
+        c = opts.c or 1
+        if opts.r != '-':
+            f = open(opts.f, 'wb')
+        else:
+            f = False
+        c64.read_ram(a, c, f)
+
+    if opts.w:
+        f = opts.w
+        a = opts.a or 0
+        c64.write_ram(a, f)
+
+    if opts.T:
+        addr = opts.T[0]
+        length = opts.T[1]
+        c64.cmd("T%04x%02x" % (addr, length), True)
+        print()
+
+    if opts.L:
+        f = opts.L
+        a = opts.a
+        if a is None:
+            l = f.read(2)
+            addr = l[0] + (l[1] << 8)
+        else:
+            addr = a
+        c64.load_prg(f, addr)
+
+    if opts.l:
+        c64.loadFileX(opts.l, opts.a)
+
+    if opts.X:
+        f = opts.X
+        a = opts.a or 0
+        c = opts.c or 1
+        while c > 0:
+            print('LOAD ADDRESS', a, '\r', end='')
+            sys.stdout.flush()
+            c64.cmd("F%04x%02x" % (a, RECSIZE), True)
+            l = c64.cmd("R%04x%04x" % (0x300, RECSIZE))
+            rom = parseRecord(l)
+            c64.waitokay()
+            if f:
+                f.write(rom)
+                f.flush()
+            c = c - RECSIZE
+            a = a + RECSIZE
+        f.close()
+
+    if opts.v:
+        f = opts.v
+        a = opts.a or 0
+        c64.verify_ram(f, a)
 
 
-if opts.w:
-    f = opts.w
-    #f = open(opts.s, 'rb')
-    a = opts.a
-    write_ram(a, f)
-
-
-if opts.T:
-    addr = opts.T[0]
-    len = opts.T[1]
-    cmd("T%04x%02x" % (addr, len), True)
-    print()
-
-if opts.L:
-    f = opts.L
-    #f = open(opts.L, 'rb')
-    a = opts.a
-    if a is None:
-        l = f.read(2)
-        addr = l[0] + (l[1] << 8)
-    else:
-        addr = a
-    load_prg(f, addr)
-
-if opts.l:
-    loadFileX(opts.l)
-
-if opts.X:
-    f = opts.X
-    a = opts.a
-    c = opts.c
-    while c > 0:
-        print('LOAD ADDRESS', a, '\r', end='')
-        sys.stdout.flush()
-        cmd("F%04x%02x" % (a, RECSIZE), True)
-        l = cmd("R%04x%04x" % (0x300, RECSIZE))
-        rom = parseRecord(l)
-        waitokay()
-        if f:
-            f.write(rom)
-            f.flush()
-        c = c - RECSIZE
-        a = a + RECSIZE
-    f.close()
-
-if opts.v:
-    f = opts.v
-    a = opts.a
-    verify_ram(f, a)
-
-
-while len(opts.args) > 0:
-    arg = opts.args.pop(0)
-    if arg == 'run': # Start BASIC programs
-        cmd("run")
-        continue
-
-    if arg == 'reset':
-        # fast reset
-        cmd('EXROM=0')
-        cmd("RESET")
-        time.sleep(0.1)
-        cmd('EXROM=1')
-        time.sleep(0.1)
-        continue
-    if arg == 'RESET':
-        cmd("RESET")
-        continue
-    if arg == 'NMI':
-        cmd("NMI")
-        continue
-
-    if arg == 'GAME=0' or arg == 'GAME=1' or arg == 'EXROM=0' or arg == 'EXROM=1':
-        cmd(arg)
-        continue
-
-    if arg == 'loadx':
-        # FIXME check
-        filename = opts.args.pop(0)
-        loadFileX(filename)
-        continue
-
-    if arg == 'load':
-        # FIXME check
-        filename = opts.args.pop(0)
-        send_cmd('load ' + filename)
-        while True:
-            answer = recv_answer()
-            if answer == 'OK':
-                break
-            if answer.startswith('ERR'):
-                print("Error", repr(answer))
-                break
-            if answer != '':
-                print(answer)
-        continue
-    if arg == 'send':
-        # FIXME check
-        filename = opts.args.pop(0)
-        sendFileX(filename)
-        continue
-    if arg == 'recv':
-        # FIXME check
-        filename = opts.args.pop(0)
-        recvFileX(filename)
-        continue
-    if arg == 'cd':
-        # FIXME check
-        filename = opts.args.pop(0)
-        send_cmd('cd ' + filename)
-        answer = recv_answer()
-        print(answer)
-        answer = recv_answer()
-        if answer != 'OK':
-            print("Error", repr(answer))
-        continue
-    if arg == 'rm':
-        # FIXME check
-        filename = opts.args.pop(0)
-        send_cmd('rm ' + filename)
-        answer = recv_answer()
-        if answer != 'OK':
-            print("Error", repr(answer))
-        continue
-    if arg == 'ls':
-        send_cmd("ls")
-        while True:
-            answer = recv_answer()
-            if answer == 'OK':
-                break
-            if answer.startswith('ERR'):
-                print("Error", repr(answer))
-                break
-            print(answer)
-        continue
-    if arg == 'tree':
-        send_cmd("tree")
-        while True:
-            answer = recv_answer()
-            if answer == 'OK':
-                break
-            if answer.startswith('ERR'):
-                print("Error", repr(answer))
-                break
-            print(answer)
-        continue
-
-    if os.path.exists(arg):
-        if arg.endswith('.sym'):
-            print('ignore sym files')
+    while len(opts.args) > 0:
+        arg = opts.args.pop(0)
+        if arg == 'run': # Start BASIC programs
+            c64.cmd("run")
             continue
-        cmd("reset")
-        addr = loadFileX(arg)
-        setBasicEnd(addr)
-        cmd("run")
-        continue
 
-    if arg.startswith('/'):
-        send_cmd(arg)
-        continue
+        if arg == 'reset':
+            # fast reset
+            c64.cmd('EXROM=0', True)
+            c64.cmd("RESET", True)
+            time.sleep(0.1)
+            c64.cmd('EXROM=1', True)
+            time.sleep(0.1)
+            continue
+        if arg == 'RESET':
+            c64.cmd("RESET", True)
+            continue
+        if arg == 'NMI':
+            c64.cmd("NMI", True)
+            continue
 
-    print("Unknown command ", repr(arg))
-    parser.print_help()
-    break
+        if arg == 'GAME=0' or arg == 'GAME=1' or arg == 'EXROM=0' or arg == 'EXROM=1':
+            c64.cmd(arg, True)
+            continue
+
+        if arg == 'loadx':
+            assert len(opts.args) > 0, 'file argument is missing'
+            filename = opts.args.pop(0)
+            c64.loadFileX(filename, opts.a)
+            continue
+        if arg == 'load':
+            assert len(opts.args) > 0, 'file argument is missing'
+            filename = opts.args.pop(0)
+            c64.cmd('load ' + filename, True)
+            continue
+        if arg == 'send':
+            assert len(opts.args) > 0, 'file argument is missing'
+            filename = opts.args.pop(0)
+            c64.sendFileX(filename)
+            continue
+        if arg == 'recv':
+            assert len(opts.args) > 0, 'file argument is missing'
+            filename = opts.args.pop(0)
+            c64.recvFileX(filename)
+            continue
+        if arg == 'cd':
+            assert len(opts.args) > 0, 'file argument is missing'
+            filename = opts.args.pop(0)
+            c64.cmd('cd ' + filename, True)
+            continue
+        if arg == 'rm':
+            assert len(opts.args) > 0, 'file argument is missing'
+            filename = opts.args.pop(0)
+            c64.cmd('rm ' + filename, True)
+            continue
+        if arg == 'ls':
+            c64.cmd("ls", True)
+            continue
+        if arg == 'tree':
+            c64.cmd("tree", True)
+            continue
+
+        if os.path.exists(arg):
+            if arg.endswith('.sym'):
+                print('ignore sym files')
+                continue
+            c64.cmd("reset")
+            addr = c64.loadFileX(arg, opts.a)
+            c64.setBasicEnd(addr)
+            c64.cmd("run")
+            continue
+
+        if arg.startswith('/'):
+            c64.cmd(arg ,True)
+            continue
+
+        print("Unknown command ", repr(arg))
+        parser.print_help()
+        break
 ###
+
+if __name__ == "__main__":
+    main()
+

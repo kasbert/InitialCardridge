@@ -23,6 +23,9 @@
 /*
    TODO
    - Cleanup
+   - Move address pins to free some UARTS for bluetooth module
+   - Add sd2iec code
+   - Add tapuino code
    - Make transfer.asm wait for commands
    - Wait for transfer.asm to perform commands
    - D64 disk emulation with kernal hooks
@@ -118,8 +121,8 @@ HardwareSerial *currentSerial = &Serial;
 #define SERIAL2 Serial
 #endif
 
-#define DEBUG(x) SERIAL2.print(x)
-#define DEBUGLN(x) SERIAL2.println(x)
+#define DEBUG(x) Serial.print(x)
+#define DEBUGLN(x) Serial.println(x)
 
 #define NOP __asm__ __volatile__ ("nop\n\t") // delay 62.5ns on a 16MHz AtMega
 
@@ -260,8 +263,8 @@ struct scmd {
   {"reset", sc_fastReset},
   {"RESET", sc_RESET},
   {"NMI", sc_NMI},
-  {"GAME", sc_GAME},
-  {"EXROM", sc_EXROM},
+  {"GAME=", sc_GAME},
+  {"EXROM=", sc_EXROM},
   {"loadx ", loadFileX}, // Load from serial to C64
   {0,0},
 };
@@ -269,9 +272,13 @@ struct scmd {
 void handleSerialCommand() {
   bool ok = false, found = false;
   err = 0;
+  if (cmd_buffer[0] == 0) {
+    return; // empty string. Don't mind ignoring this.
+  }
+  
   for (int i = 0; scmds[i].cstr; i++) {
     int clen = strlen(scmds[i].cstr);
-    if (scmds[i].cstr[clen-1] != ' ') {
+    if (scmds[i].cstr[clen-1] != ' ' && scmds[i].cstr[clen-1] != '=') {
       // no args
       if (!strcmp(cmd_buffer, scmds[i].cstr)) {
         ok = (scmds[i].cfunc)("");
@@ -295,12 +302,20 @@ void handleSerialCommand() {
       case 'V': SERIAL2.println(version_string); ok = true; break;
       case 'R': ok = sc_ReadDPRAM(cmd_buffer + 1); break;
       case 'W': ok = sc_WriteDPRAM(cmd_buffer + 1); break;
-      case ':': ok = sc_WriteDPRAMHex(cmd_buffer + 1); break;
+      case ':': {
+        int8_t ret = WriteDPRAMHex(cmd_buffer + 1); 
+        if (ret == 0) {
+          return; // Omit "OK" for speed, except for the last record
+        }
+        if (ret == 1) {
+          ok = true;
+        }
+        break;
+      }
       case 'T': ok = sc_TransferBytesToC64(cmd_buffer + 1); break;
       case 'F': ok = sc_TransferBytesFromC64(cmd_buffer + 1); break;
       case '/': ok = sc_absoluteFile(cmd_buffer); break;
 
-      case 0: break; // empty string. Don't mind ignoring this.
       default:
         err = "SYNTAX ERROR";
         break;
@@ -441,7 +456,7 @@ bool sc_ReadDPRAM(const char *arg) // R<address><size in hex>  - read <size> byt
   return true;
 }
 
-bool sc_WriteDPRAMHex(const char *arg) {
+int8_t WriteDPRAMHex(const char *arg) {
   /*
     1.  Start code, one character, an ASCII colon ':'.
     2.  uint8_t count, two hex digits (one hex digit pair), indicating the number of bytes (hex digit pairs) in the data field. The maximum uint8_t count is 255 (0xFF). 16 (0x10) and 32 (0x20) are commonly used uint8_t counts.
@@ -456,14 +471,14 @@ bool sc_WriteDPRAMHex(const char *arg) {
   int slen = strlen(arg);
   if (slen < 9) {
     err = "WAY TOO SHORT";
-    return false;
+    return -1;
   }
 
   const char *p = arg;
   uint8_t size = HexToVal(p); p += 2;
-  if (slen < 1 + 10 + 2 * size) {
+  if (slen < 10 + 2 * size) {
     err = "TOO SHORT";
-    return false;
+    return -1;
   }
   chksum += size;
   b = HexToVal(p); p += 2;
@@ -487,14 +502,14 @@ bool sc_WriteDPRAMHex(const char *arg) {
     DEBUG(b);
     DEBUG(" ");
     DEBUG(chksum);
-    DEBUG("");
-    return false;
+    DEBUGLN("");
+    return -1;
   }
   // TODO handle other record types
   if (record_type == 0 && size) {
     WriteBufferToDPRAM(addr, size);
   }
-  return record_type == 1; // Return true for END
+  return record_type; // Return 1 for END
 }
 
 bool sc_WriteDPRAM(const char *arg) // W<four byte address>:<data in hex, two characters per byte, max of 16 bytes per line>
@@ -1992,11 +2007,8 @@ static void cmdSelectFile(DirElement *element) {
 bool cmdReadDirD64(DirElement *current) { // Current points to buffer
   static uint8_t dbuffer[256];
   char name[17];
-  int type;
-  int closed;
-  int locked;
-  int size;
-  int track, sector;
+  uint8_t type;
+  uint16_t size;
 
   memset(current, 0, sizeof(DirElement));
   if (sendDotDot) {
@@ -2009,7 +2021,7 @@ bool cmdReadDirD64(DirElement *current) { // Current points to buffer
   if (doffset >= 254) {
     /* Read directory blocks */
     if (di_read(&dh, dbuffer, 254) != 254) {
-      DEBUGLN("END OF DIR");
+      // DEBUGLN("END OF DIR");
       current->type = FILE_NONE;
       return false;
     }
@@ -2021,10 +2033,6 @@ bool cmdReadDirD64(DirElement *current) { // Current points to buffer
 
     di_name_from_rawname(name, dbuffer + doffset + 5);
     type = dbuffer[doffset + 2] & 7;
-    closed = dbuffer[doffset + 2] & 0x80;
-    locked = dbuffer[doffset + 2] & 0x40;
-    track = dbuffer[doffset + 3];
-    sector = dbuffer[doffset + 4];
 
     size = dbuffer[doffset + 31] << 8 | dbuffer[doffset + 30];
     /* Convert to ascii and add quotes */
@@ -2037,7 +2045,14 @@ bool cmdReadDirD64(DirElement *current) { // Current points to buffer
     strcpy(current->name, newName);
     current->size = size * 256;
 
+#if 0
     /* Print directory entry */
+    byte closed, locked;
+    int track, sector;
+    closed = dbuffer[doffset + 2] & 0x80;
+    locked = dbuffer[doffset + 2] & 0x40;
+    track = dbuffer[doffset + 3];
+    sector = dbuffer[doffset + 4];
     DEBUG(size);
     DEBUG(',');
     DEBUG(name);
@@ -2051,7 +2066,7 @@ bool cmdReadDirD64(DirElement *current) { // Current points to buffer
     DEBUG(track);
     DEBUG(',');
     DEBUGLN(sector);
-
+#endif
 
     //printf("%-4d  %-18s%c%s%c  <%2d,%2d>\n", size, quotename, closed ? ' ' : '*', ftype[type], locked ? '<' : ' ', track, sector);
   }
@@ -2078,21 +2093,21 @@ bool cmdReadDir(DirElement *current) { // Current points to buffer
     if (entry.isDirectory()) {
       current->type = FILE_DIR;
       entry.getName(current->name, FILENAME_LENGTH);
-      DEBUG("DIR\t");
+      //DEBUG("DIR\t");
     } else {
       char newName[FILENAME_LENGTH + 5];
       entry.getName(newName, FILENAME_LENGTH + 4);
       current->type = separate_file_type(newName);
       newName[FILENAME_LENGTH] = 0;
       strcpy(current->name, newName);
-      DEBUG(entry.size());
-      DEBUG("\t");
+      //DEBUG(entry.size());
+      //DEBUG("\t");
       // files have sizes, directories do not
       current->size = entry.size(); // Both are little endian
     }
     entry.close();
     ptoa(current->name);
-    DEBUGLN(current->name);
+    //DEBUGLN(current->name);
   }
   return current->type != FILE_NONE;
 }
@@ -2143,6 +2158,7 @@ uint8_t handle_c64_input(uint8_t cmd) {
       ReadDPRAMToBuffer(IO_BUFFER_ADDR, FILENAME_LENGTH);
       buffer[FILENAME_LENGTH] = 0;
       //PrintBuffer(FILENAME_LENGTH);
+      DEBUG("OPEN DIRECTORY ");
       DEBUGLN((char*)buffer);
       changeDir((char*)buffer);
 
@@ -2175,6 +2191,7 @@ uint8_t handle_c64_input(uint8_t cmd) {
           }
         }
         WriteBufferToDPRAM(IO_BUFFER_ADDR, sizeof(DirElement) * i);
+        DEBUGLN("");
       }
       break;
 
