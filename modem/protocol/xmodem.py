@@ -62,7 +62,7 @@ class XMODEM(Modem):
                     else:
                         cancel = 1
                 else:
-                    log.error(error.ERROR_EXPECT_NAK_CRC % repr(char))
+                    log.error(error.ERROR_EXPECT_NAK_CRC % ord(char))
 
             error_count += 1
             if error_count >= retry:

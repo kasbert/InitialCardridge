@@ -3,6 +3,8 @@ Multipurpose cardridge for Commodore 64
 
 Hardware: https://easyeda.com/jarkko.sonninen/initial-cardridge-bidir
 
+![Internals](pics/initialcardridge.jpg)
+
 Cardridge consists of 1kB dual port SRAM memory and Arduino Mega 2560 Pro and a SD card reader.
 
 Dual port RAM is used for communication between Arduino and C64. Both computers can access the RAM and it is used for storing pieces of code and data transfer buffers. C64 see the RAM in module area ($8000-$9FFF) and I/O 2 ($DF00). The latter is used by C64 to deliver messages to Arduino.
