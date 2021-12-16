@@ -45,7 +45,7 @@ static void printElement(uint16_t pos);
 static char linebuffer[SCREENW+1];
 static Directory *dir = NULL;
 static uint8_t textc = COLOR_LIGHTGREEN;
-static const char *program = "InitialCardridge SD Browser v0.9";
+static const char *program = "InitialCardridge SD Browser v0.10";
 
 #ifdef DIRH
 #undef DIRH
@@ -60,7 +60,7 @@ static const char *program = "InitialCardridge SD Browser v0.9";
 int main(void)
 {
   initScreen(COLOR_BLACK, COLOR_BLACK, textc);
-  ((uint8_t*)(204))[0] = 255; 
+  ((uint8_t*)(204))[0] = 255;
   mainLoop();
   __asm__ ("jmp $fce2");    // Soft reset
   return 0;
@@ -142,11 +142,11 @@ static void mainLoop(void)
         if (!c)
         {
             j = joy_read(1);
-            c = JOY_BTN_UP(j) ? CH_CURS_UP :
-                JOY_BTN_DOWN(j) ? CH_CURS_DOWN :
-                JOY_BTN_LEFT(j) ? CH_CURS_LEFT :
-                JOY_BTN_RIGHT(j) ? CH_CURS_RIGHT :
-                JOY_BTN_FIRE(j) ? 13 : 0;
+            c = JOY_UP(j) ? CH_CURS_UP :
+                JOY_DOWN(j) ? CH_CURS_DOWN :
+                JOY_LEFT(j) ? CH_CURS_LEFT :
+                JOY_RIGHT(j) ? CH_CURS_RIGHT :
+                JOY_FIRE(j) ? 13 : 0;
 
             if (c)
             {

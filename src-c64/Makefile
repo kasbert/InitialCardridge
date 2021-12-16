@@ -1,4 +1,4 @@
-all: browser control browser.h control.h
+all: control menu browser control_bin.h menu_prg.h browser_prg.h
 
 ARDUINO=$(HOME)/arduino-1.8.12
 
@@ -6,17 +6,23 @@ control:
 	cl65 -t c64 -C ./c64-asm.cfg control.s -o control.bin
 #	xa control.s -o control.bin
 
+menu:
+	cl65 -t c64 -Oi menu.c icif.c minidelay.s -o menu.prg
+
 browser:
 	cl65 -t c64 -Oi screen.c browser.c dir.c base.c icif.c minidelay.s -o browser.prg
 
-control.h: control.bin
+control_bin.h: control.bin
 	xxd -i control.bin > control_bin.h
 
-browser.h: browser.prg
+menu_prg.h: menu.prg
+	xxd -i menu.prg > menu_prg.h
+
+browser_prg.h: browser.prg
 	xxd -i browser.prg > browser_prg.h
 
 clean:
-	rm -rf *.o browser.prg control.bin *.hex control_bin.h browser_prg.h
+	rm -rf *.o browser.prg control.bin *.hex control_bin.h menu_prg.h browser_prg.h
 
 #not used
 control.hex: control.bin

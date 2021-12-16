@@ -42,5 +42,6 @@ bool     ic_cmd(uint8_t cmd);
 bool     ic_open_dir(char *path, char *new_path);
 bool     ic_next_dir_entry(DirElement *element);
 bool     ic_load_and_run_file(DirElement *elemg);
+bool     ic_select_boot(DirElement *elemg);
 
 #endif

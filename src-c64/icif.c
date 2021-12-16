@@ -131,7 +131,7 @@ bool ic_open_dir(char *path, char *new_path)
   bool result;
   filenamecpy(IO_BUFFER, path);
   result = ic_cmd(CMD_SD_OPEN_DIR);
-  if (result)
+  if (result && new_path)
   {
     filenamecpy(new_path, IO_BUFFER);
   }
@@ -158,4 +158,10 @@ bool ic_load_and_run_file(DirElement *element)
 {
   memcpy(IO_BUFFER, element, sizeof(DirElement));
   return ic_cmd(CMD_SD_SELECT_FILE);
+}
+
+bool ic_select_boot(DirElement *element)
+{
+  memcpy(IO_BUFFER, element, sizeof(DirElement));
+  return ic_cmd(CMD_SELECT_BOOT);
 }

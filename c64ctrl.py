@@ -24,6 +24,8 @@ parser = argparse.ArgumentParser(
             loadx <file.prg> - Load PRG file to C64 (or use -l <file.prg>)
             run - Start basic program in C64
             reset - perform fast reset
+            p - print text
+            i - input text
             RESET - perform normal reset
             NMI - perform NMI
             GAME=0 - Set GAME line low (enable)
@@ -42,6 +44,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument("-V", "--version", help="version", action="store_true")
 parser.add_argument("-d", "--debug", help="debug", action="store_true")
 parser.add_argument("-p", "--port", help="device, default /dev/ttyUSB0", default='/dev/ttyUSB0')
+parser.add_argument("-W", "--initial-wait", type=float, help="Initial wait before first command", default='1.0')
 
 parser.add_argument("-a", type=int, help="start address", default = None)
 parser.add_argument("-c", type=int, help="count", default = 1024)
@@ -108,19 +111,22 @@ class C64Ctrl:
     if serialclient == None:
         port = kwargs.get('port', '/dev/ttyUSB0')
         baudrate = kwargs.get('baudrate', 115200)
-        # Prevent Arduino boot
-        os.system('stty -F ' + port + ' -hupcl')
-        self.ser = serial.Serial(port, baudrate, timeout=0.5)
+        ## Prevent Arduino boot
+        #os.system('stty -F ' + port + ' -hupcl')
+        self.ser = serial.Serial(port, baudrate, timeout=2.5)
     else:
         self.ser = serialclient
-    #time.sleep(1.0) # Opening serial port boots the Arduino
+    time.sleep(kwargs.get("initial_wait")) # Opening serial port boots the Arduino
 
+    timeo = self.ser.timeout
+    self.ser.timeout = 0.1
     while True:
         s = self.ser.readline()
         if self.debug:
             print('<', repr(s))
         if s is None or len(s) == 0:
             break
+    self.ser.timeout = timeo
 
  def send_cmd(self, s):
     if self.debug:
@@ -134,7 +140,7 @@ class C64Ctrl:
         print('<', repr(s))
     s = s.strip()
     return s
-    
+
  def cmd(self, s, w=False):
     self.send_cmd(s)
     if w:
@@ -196,7 +202,7 @@ class C64Ctrl:
         if self.debug != True:
             print(s, "\n", end='')
             sys.stdout.flush()
-        cmd(s, True);
+        cmd(s, True)
         if len(l) != 16:
             break
         a = a + 16
@@ -216,7 +222,7 @@ class C64Ctrl:
         if len(l) != RECSIZE:
             break
         a = a + RECSIZE
-    self.cmd(":00000001FF", True);
+    self.cmd(":00000001FF", True)
     f.close()
     print()
 
@@ -271,7 +277,7 @@ class C64Ctrl:
         if size == 0:
             break
         s = calcwriteline(0x100, l)
-        self.cmd(s, True);
+        self.cmd(s, True)
         print('LOAD ADDRESS', addr, size, '\r', end='')
         sys.stdout.flush()
         self.cmd("T%04x%02x" % (addr, size), True)
@@ -282,7 +288,7 @@ class C64Ctrl:
     # Update basic pointers
     l = bytes([addr & 0xff, addr >> 8, addr & 0xff, addr >> 8, addr & 0xff, addr >> 8])
     s = calcwriteline(0x100, l)
-    self.cmd(s, True);
+    self.cmd(s, True)
     self.cmd("T%04x%02x" % (0x2d, len(l)), True)
     f.close()
     time.sleep(0.1)
@@ -298,6 +304,23 @@ class C64Ctrl:
     self.cmd("T%04x%02x" % (0x2d, len(l)), True)
     print()
 
+ def printText(self, text):
+    self.cmd("p " + text, True);
+
+ def inputText(self, text):
+    if text == '':
+        text = "\r"
+    text = text.encode('latin-1').decode('unicode_escape')
+    for i in range(0, len(text), 9):
+        txt = text[i:i+9]
+        textlen = len(txt)
+        s = calcwriteline(0x100, txt.encode('latin-1'))
+        self.cmd(s, True);
+        self.cmd("T%04x%02x" % (0x0277, textlen), True)
+        self.cmd(calcwriteline(0x100, bytes([textlen])), True);
+        self.cmd("T%04x%02x" % (0xc6, 1), True)
+    print()
+
  # XModem methods
 
  def getc(self, size, timeout=5):
@@ -305,7 +328,7 @@ class C64Ctrl:
     if r:
         data = self.ser.read(size)
         return data
-        
+
  def putc(self, data, timeout=1):
     r, w, e = select.select([], [self.ser.fileno()], [], timeout)
     if w: return self.ser.write(data)
@@ -352,6 +375,8 @@ class C64Ctrl:
         l = f.read(2)
         addr = l[0] + (l[1] << 8)
     else:
+        if filename.endswith('.prg') or filename.endswith('.PRG'):
+            f.read(2)
         addr = a
     print("LOAD", filename, addr, size)
     self.send_cmd("loadx "+ str(addr) + " " + str(size))
@@ -374,7 +399,7 @@ class C64Ctrl:
 def main():
 
     opts = parser.parse_args()
-    c64 = C64Ctrl(port = opts.port, debug = opts.debug)
+    c64 = C64Ctrl(port = opts.port, debug = opts.debug, initial_wait = opts.initial_wait)
 
     if opts.version:
         print(c64.cmd('V'))
@@ -386,7 +411,7 @@ def main():
         tools.log.setLevel(1)
     else:
         tools.log.setLevel(11)
-    
+
     if opts.r:
         a = opts.a or 0
         c = opts.c or 1
@@ -448,6 +473,16 @@ def main():
         arg = opts.args.pop(0)
         if arg == 'run': # Start BASIC programs
             c64.cmd("run")
+            continue
+        if arg == 'p':
+            assert len(opts.args) > 0, 'argument is missing'
+            text = opts.args.pop(0)
+            c64.printText(text)
+            continue
+        if arg == 'i':
+            assert len(opts.args) > 0, 'argument is missing'
+            text = opts.args.pop(0)
+            c64.inputText(text)
             continue
 
         if arg == 'reset':

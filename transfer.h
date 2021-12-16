@@ -30,5 +30,7 @@
 #define TO_C64_BUFFER2_ADDR  (0x8200)
 #define TO_C64_BUFFER2  ((unsigned char *) TO_C64_BUFFER2_ADDR)
 
+#define FROM_C64_BUFFER_ADDR  (0xdf00)
+#define FROM_C64_BUFFER  ((unsigned char *) FROM_C64_BUFFER_ADDR)
 
 #endif

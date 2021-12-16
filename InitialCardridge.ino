@@ -46,6 +46,7 @@
 #include <avr/io.h>
 #include <SPI.h>
 #include <SdFat.h>
+#include <EEPROM.h>
 #include "XModem.h"
 
 #include "commands.h"
@@ -57,6 +58,8 @@ PROGMEM const
 #include "src-c64/control_bin.h"
 PROGMEM const
 #include "src-c64/browser_prg.h"
+PROGMEM const
+#include "src-c64/menu_prg.h"
 //Another try
 //#define CONTROL_PROGMEM_ADDR 0x30000
 //#define BROWSER_PROGMEM_ADDR 0x30400
@@ -67,7 +70,7 @@ const char hexa[] =
   '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
 };
 
-const char version_string[] = {"Initial Cardridge 0.9"};
+const char version_string[] = {"Initial Cardridge 0.10"};
 
 // See SetAddress()
 static const int kPin_Addr0   = 8; // PH5
@@ -259,7 +262,10 @@ struct scmd {
   {"sleep ", sc_playlistSleep}, // Sleep in playlist
   {"lc", sc_loadControl},
   {"lb", sc_loadBrowser},
+  {"lm", sc_loadMenu},
   {"l", sc_quickLoad},
+  {"er ", sc_eepromRead},
+  {"ew ", sc_eepromWrite},
   {"reset", sc_fastReset},
   {"RESET", sc_RESET},
   {"NMI", sc_NMI},
@@ -275,7 +281,7 @@ void handleSerialCommand() {
   if (cmd_buffer[0] == 0) {
     return; // empty string. Don't mind ignoring this.
   }
-  
+
   for (int i = 0; scmds[i].cstr; i++) {
     int clen = strlen(scmds[i].cstr);
     if (scmds[i].cstr[clen-1] != ' ' && scmds[i].cstr[clen-1] != '=') {
@@ -295,7 +301,7 @@ void handleSerialCommand() {
       }
     }
   }
-  
+
   if (!found) {
     switch (cmd_buffer[0])
     {
@@ -303,7 +309,7 @@ void handleSerialCommand() {
       case 'R': ok = sc_ReadDPRAM(cmd_buffer + 1); break;
       case 'W': ok = sc_WriteDPRAM(cmd_buffer + 1); break;
       case ':': {
-        int8_t ret = WriteDPRAMHex(cmd_buffer + 1); 
+        int8_t ret = WriteDPRAMHex(cmd_buffer + 1);
         if (ret == 0) {
           return; // Omit "OK" for speed, except for the last record
         }
@@ -432,7 +438,7 @@ bool sc_TransferBytesFromC64(const char *arg) // F<four byte hex address><size i
   const char *p = arg;
   uint16_t addr = HexToVal16(p); p += 4;
   uint8_t size = HexToVal(p); p += 2;
-  return TransferBytesInC64(addr, 0xdf00, size, TRANSFER_CMD_TRANSFER_2);
+  return TransferBytesInC64(addr, FROM_C64_BUFFER_ADDR, size, TRANSFER_CMD_TRANSFER_2);
 }
 
 bool sc_ReadDPRAM(const char *arg) // R<address><size in hex>  - read <size> bytes from DPRAM, beginning at <address> (in hex)
@@ -573,11 +579,50 @@ bool sc_loadBrowser(const char *arg) {
   return loadBrowser();
 }
 
+bool sc_loadMenu(const char *arg) {
+  return loadMenu();
+}
+
 bool sc_quickLoad(const char *arg) {
   return loadFileSD("BOULDE~2.PRG"); // for quick testing
   //return listD64("still_strong.d64"); // for quick testing
 }
 
+bool sc_eepromRead(const char *arg) {
+  if (strlen(arg) < 6) {
+    err = "ARGS";
+    return false;
+  }
+  const char *p = arg;
+  uint16_t addr = HexToVal16(p); p += 4;
+  uint8_t size = HexToVal(p); p += 2;
+  for (int i = 0; i < size; i++) {
+    buffer[i]= EEPROM.read(addr + i);
+  }
+  PrintBuffer(size);
+  return true;
+}
+
+bool sc_eepromWrite(const char *arg) {
+  if (strlen(arg) < 6) {
+    err = "ARGS";
+    return false;
+  }
+  const char *p = arg;
+  uint16_t addr = HexToVal16(p); p += 4;
+  uint16_t size = 0;
+  while (p[0] && p[1] && size < kMaxBufferSize)
+  {
+    uint8_t c = HexToVal(p);
+    p += 2;
+    EEPROM.write(addr + size, c);
+    size++;
+  }
+  for (int i = 0; i < size; i++) {
+    buffer[i]= EEPROM.read(addr + i);
+  }
+  PrintBuffer(size);
+}
 
 bool sc_fastReset(const char *arg) {
   return fastReset();
@@ -884,6 +929,10 @@ bool printText(const char *text) {
   for (i = 0; text[i] && i < 40; i++) {
     WriteByteTo(TO_C64_BUFFER1_ADDR + i, text[i]);
   }
+  if (!text[0]) {
+    WriteByteTo(TO_C64_BUFFER1_ADDR, 0x0d); // return
+    i = 1;
+  }
   WriteByteTo(TO_C64_BUFFER1_ADDR + i, 0);
   WriteByteTo(TRANSFER_CMD_ADDR, TRANSFER_CMD_PRINT);
   endDPRAMWrite();
@@ -973,13 +1022,23 @@ bool loadControlSD() {
 }
 
 bool loadBrowser() {
-  uint32_t far_address = (uint32_t)browser_prg; //BROWSER_PROGMEM_ADDR;
-
+  uint32_t far_address = (uint32_t)browser_prg;
+  uint16_t len = sizeof(browser_prg);
   DEBUG("LOADING BROWSER ");
+  return loadPgm(far_address, len);
+}
+
+bool loadMenu() {
+  uint32_t far_address = (uint32_t)menu_prg;
+  uint16_t len = sizeof(menu_prg);
+  DEBUG("LOADING MENU ");
+  return loadPgm(far_address, len);
+}
+
+bool loadPgm(uint32_t far_address, uint16_t len) {
   long before = millis();
 
   int i = 0;
-  uint16_t len = sizeof(browser_prg); // pgm_read_byte_far( far_address + i++) + (pgm_read_byte_far( far_address + i++) << 8);
   uint16_t addr = pgm_read_byte_far( far_address + i++) + (pgm_read_byte_far( far_address + i++) << 8);
   //uint16_t addr = 0x400;
   DEBUG(len);
@@ -1082,12 +1141,12 @@ bool loadFileSD(const char *filename) {
         break;
       }
 
-      TransferBytesInC64(addr, 0xdf00, len, TRANSFER_CMD_TRANSFER_2);
+      TransferBytesInC64(addr, FROM_C64_BUFFER_ADDR, len, TRANSFER_CMD_TRANSFER_2);
       delay(3);
       beginDPRAMRead();
       for (int x = 0; x < len; ++x)
       {
-        uint8_t b = ReadByteFrom(0xdf00 + x);
+        uint8_t b = ReadByteFrom(FROM_C64_BUFFER_ADDR + x);
         if (b != buffer[x]) {
         DEBUG("VERIFY ERROR ");
         DEBUG(addr);
@@ -1268,12 +1327,39 @@ void checkNMI() {
   */
 }
 
+static bool loadEepromFile() {
+  char newPath[PATH_MAX];
+  for (int i = 0; i < sizeof(DirElement); i++) {
+    buffer[i] = EEPROM.read(i);
+    // TODO add checksum
+  }
+  DirElement *element = (DirElement *)buffer;
+  if (element->type == 0xa0) {
+    return true;
+  }
+  if (element->name[FILENAME_LENGTH] != 0 || element->type != FILE_PRG) {
+    return false;
+  }
+  makeFilePath(newPath, element->name);
+  if (!SD.exists(newPath)) {
+    strcat (newPath, ".PRG");
+    if (!SD.exists(newPath)) {
+      return false;
+    }
+  }
+  DEBUG("EEPROM FILE ");
+  DEBUGLN(newPath);
+  printText("LOADING ");
+  printText(element->name);
+  loadFileSD(newPath);
+  return true;
+}
 
 void check_NMI() {
   if (NMICount < 2 && !sw2 && !sw1) {
     return;
   }
-  DEBUG("RESTORE * 3 - LOADING BROWSER ");
+  DEBUG("RESTORE * 3 - LOADING MENU ");
   DEBUGLN(NMICount);
   sw1 = sw2 = false;
   NMICount = 0;
@@ -1281,7 +1367,18 @@ void check_NMI() {
   endPlaylist();
   loadControlSD() || loadControl();
   fastReset();
-  loadFileSD(0) || loadBrowser();
+
+  // Check if space bar is pressed
+  uint8_t dc01 = 0;
+  if (TransferBytesInC64(0xdc01, FROM_C64_BUFFER_ADDR, 1, TRANSFER_CMD_TRANSFER_2)) {
+    ReadDPRAMToBuffer(FROM_C64_BUFFER_ADDR, 1);
+    dc01 = buffer[0];
+    DEBUG("READ DC01: ");
+    DEBUG(dc01);
+    DEBUGLN("");
+  }
+
+  (dc01 == 0xef && loadMenu()) || loadEepromFile() || loadFileSD(0) || loadBrowser();
   runBasic();
 }
 
@@ -2141,7 +2238,7 @@ uint8_t handle_c64_input(uint8_t cmd) {
     case CMD_SD_SELECT_FILE:
       {
         DEBUGLN("CMD_SD_SELECT_FILE");
-        ReadDPRAMToBuffer(IO_BUFFER_ADDR, sizeof(DirElement));
+        ReadDPRAMToBuffer(FROM_C64_BUFFER_ADDR, sizeof(DirElement));
         //PrintBuffer(FILENAME_LENGTH);
         DirElement *element = (DirElement *)buffer;
         element->name[FILENAME_LENGTH] = 0;
@@ -2153,9 +2250,27 @@ uint8_t handle_c64_input(uint8_t cmd) {
       }
       break;
 
+    case CMD_SELECT_BOOT:
+      {
+        DEBUGLN("CMD_SELECT_BOOT");
+        ReadDPRAMToBuffer(FROM_C64_BUFFER_ADDR, sizeof(DirElement));
+        //PrintBuffer(FILENAME_LENGTH);
+        DirElement *element = (DirElement *)buffer;
+        element->name[FILENAME_LENGTH] = 0;
+        for (int i = 0; i < sizeof(DirElement); i++) {
+          EEPROM.write(i, buffer[i]);
+          // TODO add checksum
+        }
+        changeDir("/");
+        fastReset();
+        loadEepromFile() || loadBrowser();
+        runBasic();
+      }
+      break;
+
     case CMD_SD_OPEN_DIR:
       DEBUG("CMD_SD_OPEN_DIR: ");
-      ReadDPRAMToBuffer(IO_BUFFER_ADDR, FILENAME_LENGTH);
+      ReadDPRAMToBuffer(FROM_C64_BUFFER_ADDR, FILENAME_LENGTH);
       buffer[FILENAME_LENGTH] = 0;
       //PrintBuffer(FILENAME_LENGTH);
       DEBUG("OPEN DIRECTORY ");
@@ -2170,7 +2285,7 @@ uint8_t handle_c64_input(uint8_t cmd) {
       } else {
         dirTitle((char*)buffer);
       }
-      WriteBufferToDPRAM(IO_BUFFER_ADDR, FILENAME_LENGTH);
+      WriteBufferToDPRAM(FROM_C64_BUFFER_ADDR, FILENAME_LENGTH);
       break;
 
     case CMD_SD_READ_DIR_FAST:
@@ -2190,7 +2305,7 @@ uint8_t handle_c64_input(uint8_t cmd) {
             }
           }
         }
-        WriteBufferToDPRAM(IO_BUFFER_ADDR, sizeof(DirElement) * i);
+        WriteBufferToDPRAM(FROM_C64_BUFFER_ADDR, sizeof(DirElement) * i);
         DEBUGLN("");
       }
       break;
